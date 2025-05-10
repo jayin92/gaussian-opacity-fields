@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16.3)
+set(CMAKE_CUDA_HOST_COMPILER /usr/bin/gcc-9)
 project(fast_traversal LANGUAGES CXX CUDA)
+message(STATUS "CMAKE_CXX_COMPILER_ID: ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "CMAKE_CXX_COMPILER_VERSION: ${CMAKE_CXX_COMPILER_VERSION}")
 enable_language(CUDA)
 
 include(FetchContent)

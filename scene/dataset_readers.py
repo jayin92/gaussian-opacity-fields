@@ -22,6 +22,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+import copy
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -29,6 +30,8 @@ class CameraInfo(NamedTuple):
     T: np.array
     FovY: np.array
     FovX: np.array
+    cx: np.array
+    cy: np.array
     image: np.array
     image_path: str
     image_name: str
@@ -84,11 +87,15 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
+            cx = intr.params[1]
+            cy = intr.params[2]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
         elif intr.model=="PINHOLE":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
+            cx = intr.params[2]
+            cy = intr.params[3]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         else:
@@ -96,15 +103,19 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        
-        if not os.path.exists(image_path) or "sky_mask" in image_path:
-            print("skip =====", image_path)
-            continue
-        
         image = Image.open(image_path)
-
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+        # get rid of too many opened files
+        image = copy.deepcopy(image)
+        cx = (cx - width / 2) / width * 2
+        cy = (cy - height / 2) / height * 2
+        
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, 
+                              cx=cx, cy=cy,
+                              image=image,
+                              image_path=image_path, 
+                              image_name=image_name, 
+                              width=width, 
+                              height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -343,8 +354,107 @@ def readMultiScaleNerfSyntheticInfo(path, white_background, eval, load_allres=Fa
                            ply_path=ply_path)
     return scene_info
 
+def readSatelliteInfo(path, white_background, eval, extension=".png"):
+    print("Reading Training Transforms")
+    train_cam_infos = readSatelliteCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
+    print("Reading Test Transforms")
+    test_cam_infos = readSatelliteCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+    print(f"Number of training images: {len(train_cam_infos)}")
+    print(f"Number of testing images: {len(test_cam_infos)}")
+    
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    nerf_normalization = {"translate": np.array([0.0, 0.0, 0.0]), "radius": 1.0}
+    print(nerf_normalization)
+    # Generate .ply file from point3D.txt
+    ply_path = os.path.join(path, "points3D.ply")
+    txt_path = os.path.join(path, "points3D.txt")
+    if not os.path.exists(ply_path):
+        print("Converting point3D.txt to .ply, will happen only the first time you open the scene.")
+        try:
+            xyz, rgb, _ = read_points3D_text(txt_path)
+            storePly(ply_path, xyz, rgb)
+        except Exception as e:
+            print(f"Error converting point3D.txt to .ply: {e}")
+
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        print("Loading point cloud from", ply_path)
+        pcd = fetchPly(ply_path)
+        # print number of points
+        print(f"Number of points in the point cloud: {len(pcd.points)}")
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+def readSatelliteCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        frames = contents["frames"]
+        width = contents["w"]
+        height = contents["h"]
+        for idx, frame in enumerate(frames):
+            cam_name = os.path.join(path, frame["file_path"])
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+
+            # No need for this change in satellite data, we use COLMAP coordinates system
+            # c2w[:3, 1:3] *= -1
+
+            # get the world-to-camera transform and set R, T
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+
+            image_path = os.path.join(path, cam_name)
+            image_name = Path(cam_name).stem
+            image = Image.open(image_path)
+            
+            focal_x = frame["fl_x"]
+            focal_y = frame["fl_y"]
+            cx = frame["cx"]
+            cy = frame["cy"]
+            cx = (cx - width / 2) / width * 2
+            cy = (cy - height / 2) / height * 2
+
+            FovX = focal2fov(focal_x, image.size[0])
+            FovY = focal2fov(focal_y, image.size[1])
+
+            cam_infos.append(
+                CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, 
+                            cx=cx, cy=cy,
+                            image=image,
+                            image_path=image_path, 
+                            image_name=image_name, 
+                            width=image.size[0], 
+                            height=image.size[1])
+            )
+    return cam_infos
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "Multi-scale": readMultiScaleNerfSyntheticInfo,
+    "Satellite": readSatelliteInfo,
 }

@@ -286,8 +286,10 @@ class GaussianModel:
             x, y, z = xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2]
             z = torch.clamp(z, min=0.001)
             
-            x = x / z * camera.focal_x + camera.image_width / 2.0
-            y = y / z * camera.focal_y + camera.image_height / 2.0
+            cx_ori = camera.cx / 2 * camera.image_width + camera.image_width / 2
+            cy_ori = camera.cy / 2 * camera.image_height + camera.image_height / 2
+            x = x / z * camera.focal_x + cx_ori
+            y = y / z * camera.focal_y + cy_ori
             
             # in_screen = torch.logical_and(torch.logical_and(x >= 0, x < camera.image_width), torch.logical_and(y >= 0, y < camera.image_height))
             
