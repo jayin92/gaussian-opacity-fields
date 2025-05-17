@@ -23,6 +23,7 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 import copy
+import OpenEXR
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -35,6 +36,8 @@ class CameraInfo(NamedTuple):
     image: np.array
     image_path: str
     image_name: str
+    depth: np.array
+    mask: np.array
     width: int
     height: int
 
@@ -356,9 +359,9 @@ def readMultiScaleNerfSyntheticInfo(path, white_background, eval, load_allres=Fa
 
 def readSatelliteInfo(path, white_background, eval, extension=".png"):
     print("Reading Training Transforms")
-    train_cam_infos = readSatelliteCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
+    train_cam_infos, R, T = readSatelliteCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
     print("Reading Test Transforms")
-    test_cam_infos = readSatelliteCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+    test_cam_infos, _, _ = readSatelliteCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
     print(f"Number of training images: {len(train_cam_infos)}")
     print(f"Number of testing images: {len(test_cam_infos)}")
     
@@ -366,18 +369,101 @@ def readSatelliteInfo(path, white_background, eval, extension=".png"):
         train_cam_infos.extend(test_cam_infos)
         test_cam_infos = []
     nerf_normalization = getNerfppNorm(train_cam_infos)
-    nerf_normalization = {"translate": np.array([0.0, 0.0, 0.0]), "radius": 1.0}
-    print(nerf_normalization)
+    # nerf_normalization = {"translate": np.array([0.0, 0.0, 0.0]), "radius": 128.0}
     # Generate .ply file from point3D.txt
     ply_path = os.path.join(path, "points3D.ply")
     txt_path = os.path.join(path, "points3D.txt")
-    if not os.path.exists(ply_path):
-        print("Converting point3D.txt to .ply, will happen only the first time you open the scene.")
-        try:
-            xyz, rgb, _ = read_points3D_text(txt_path)
-            storePly(ply_path, xyz, rgb)
-        except Exception as e:
-            print(f"Error converting point3D.txt to .ply: {e}")
+    print("Converting point3D.txt to .ply, will happen only the first time you open the scene.")
+    try:
+        xyz, rgb, _ = read_points3D_text(txt_path)
+        if R is not None and T is not None:
+            print("Normalizing point cloud")
+            xyz = np.matmul(xyz, R.T) - T
+            # Get the radius of the point cloud using 99% of the points
+            radius = np.percentile(np.linalg.norm(xyz, axis=1), 99)
+            # Resize the point cloud to fit in a sphere of radius 256
+            scale = 256 / radius
+            print(f"Point cloud radius: {radius}, scale: {scale}")
+            xyz = xyz * scale
+            # Make the point cloud lies in z = 0
+            z_min = np.percentile(xyz[:, 2], 1)
+            xyz = xyz - np.array([0, 0, z_min])
+            print("Point cloud z_min: ", z_min)
+            # print("Point cloud z_avg: ", np.mean(xyz[:, 2]))
+            # Also resize the camera pose
+            new_train_cam_infos = []
+            new_test_cam_infos = []
+            print("Normalizing camera poses")
+            for cam in train_cam_infos:
+                # cam_info is NamedTuple, we can't directly modify it
+                # 1. Reconstruct the original c2w matrix from w2c components
+                R_w2c = cam.R  # Already transposed in your code
+                T_w2c = cam.T
+                
+                # Build the full w2c matrix
+                w2c_matrix = np.eye(4)
+                w2c_matrix[:3, :3] = R_w2c.T  # Transpose back for matrix construction
+                w2c_matrix[:3, 3] = T_w2c
+                
+                # Get the c2w matrix
+                c2w_matrix = np.linalg.inv(w2c_matrix)
+                
+                # 2. Apply the transformations in world space
+                # Apply scaling
+                c2w_matrix[:3, 3] *= scale
+                
+                # Apply z-shift (only to the z component)
+                c2w_matrix[2, 3] -= z_min  # Note the sign - subtracting in world space
+                
+                # 3. Convert back to w2c
+                w2c_transformed = np.linalg.inv(c2w_matrix)
+                
+                # 4. Extract the components
+                R_new = np.transpose(w2c_transformed[:3, :3])  # Remember to transpose for CUDA code
+                T_new = w2c_transformed[:3, 3]
+                
+                # Create the new camera info
+                new_train_cam_infos.append(cam._replace(R=R_new, T=T_new))
+            for cam in test_cam_infos:
+                # cam_info is NamedTuple, we can't directly modify it
+                # 1. Reconstruct the original c2w matrix from w2c components
+                R_w2c = cam.R  # Already transposed in your code
+                T_w2c = cam.T
+                
+                # Build the full w2c matrix
+                w2c_matrix = np.eye(4)
+                w2c_matrix[:3, :3] = R_w2c.T  # Transpose back for matrix construction
+                w2c_matrix[:3, 3] = T_w2c
+                
+                # Get the c2w matrix
+                c2w_matrix = np.linalg.inv(w2c_matrix)
+                
+                # 2. Apply the transformations in world space
+                # Apply scaling
+                c2w_matrix[:3, 3] *= scale
+                
+                # Apply z-shift (only to the z component)
+                c2w_matrix[2, 3] -= z_min  # Note the sign - subtracting in world space
+                
+                # 3. Convert back to w2c
+                w2c_transformed = np.linalg.inv(c2w_matrix)
+                
+                # 4. Extract the components
+                R_new = np.transpose(w2c_transformed[:3, :3])  # Remember to transpose for CUDA code
+                T_new = w2c_transformed[:3, 3]
+                
+                # Create the new camera info
+                new_test_cam_infos.append(cam._replace(R=R_new, T=T_new))
+            train_cam_infos = new_train_cam_infos
+            test_cam_infos = new_test_cam_infos
+            nerf_normalization = {"translate": np.array([0.0, 0.0, 0.0]), "radius": 128.0}
+        else:
+            print("No rotation matrix found, skipping normalization")
+            nerf_normalization = {"translate": np.array([0.0, 0.0, 0.0]), "radius": 128.0}
+        print(f"Nerf Normalization: {nerf_normalization}")
+        storePly(ply_path, xyz, rgb)
+    except Exception as e:
+        print(f"Error converting point3D.txt to .ply: {e}")
 
     if not os.path.exists(ply_path):
         # Since this data set has no colmap data, we start with random points
@@ -411,13 +497,23 @@ def readSatelliteCamerasFromTransforms(path, transformsfile, white_background, e
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         frames = contents["frames"]
-        width = contents["w"]
-        height = contents["h"]
+        # The scene has been normalized, so that the up vector is (0, 0, 1)
+        if "R" in contents:
+            R_fix = np.array(contents["R"])[:3, :3]
+            assert R_fix.shape == (3, 3), f"R_fix.shape = {R_fix.shape}"
+            T_fix = np.array(contents["T"])
+            c2w_key = "transform_matrix_rotated"
+        else:
+            R_fix = None
+            T_fix = None
+            c2w_key = "transform_matrix"
+        # width = contents["w"]
+        # height = contents["h"]
         for idx, frame in enumerate(frames):
             cam_name = os.path.join(path, frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform
-            c2w = np.array(frame["transform_matrix"])
+            c2w = np.array(frame[c2w_key])
 
             # No need for this change in satellite data, we use COLMAP coordinates system
             # c2w[:3, 1:3] *= -1
@@ -430,11 +526,30 @@ def readSatelliteCamerasFromTransforms(path, transformsfile, white_background, e
             image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
+
+            mask_path = os.path.join(path, "masks", image_name+".npy")
+            if os.path.exists(mask_path):
+                mask = np.load(mask_path)
+                mask = mask.astype(np.uint8)
+            else:
+                # assert False, "No mask found for image: {}".format(image_path)
+                # create a binary mask, if all pixel value is (0, 0, 0), set it to 0, otherwise 1
+                mask = 1 - np.all(np.array(image) == 0, axis=-1).astype(np.uint8)
+
+            
+            depth_path = os.path.join(path, "depths_moge", image_name+".exr")
+            if os.path.exists(depth_path):
+                depth = read_exr(depth_path)
+            else:
+                depth = None
+
             
             focal_x = frame["fl_x"]
             focal_y = frame["fl_y"]
             cx = frame["cx"]
             cy = frame["cy"]
+            height = image.size[1]
+            width = image.size[0]
             cx = (cx - width / 2) / width * 2
             cy = (cy - height / 2) / height * 2
 
@@ -446,11 +561,40 @@ def readSatelliteCamerasFromTransforms(path, transformsfile, white_background, e
                             cx=cx, cy=cy,
                             image=image,
                             image_path=image_path, 
-                            image_name=image_name, 
+                            image_name=image_name,
+                            depth=depth,
+                            mask=mask,
                             width=image.size[0], 
                             height=image.size[1])
             )
-    return cam_infos
+    return cam_infos, R_fix, T_fix
+
+def read_exr(filename: str) -> np.ndarray:
+    """
+    Read EXR file with its original metadata and attributes
+    """
+    exr_file = OpenEXR.InputFile(filename)
+    header = exr_file.header()
+    
+    # Get data window
+    dw = header['dataWindow']
+    width = dw.max.x - dw.min.x + 1
+    height = dw.max.y - dw.min.y + 1
+    
+    # Get pixel type and channels
+    pixel_type = header['channels']['R'].type if 'R' in header['channels'] else header['channels']['Y'].type
+    
+    # Read channel data
+    if 'R' in header['channels']:  # RGB format
+        channels = ['R', 'G', 'B']
+        pixel_data = [np.frombuffer(exr_file.channel(c, pixel_type), dtype=np.float32) for c in channels]
+        img = np.stack([d.reshape(height, width) for d in pixel_data], axis=-1)
+    else:  # Grayscale format
+        pixel_data = np.frombuffer(exr_file.channel('Y', pixel_type), dtype=np.float32)
+        img = pixel_data.reshape(height, width)
+    
+    return img
+
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,

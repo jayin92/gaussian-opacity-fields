@@ -5,12 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import itertools
 
-scenes = ["JAX_068"]
+scenes = ["NYC_004"] #, "NYC_010", "NYC_219", "NYC_336"]
 factors = [1] * len(scenes)
 
 
-dataset_dir = "/project/jayinnn/SatelliteSfM/data/DFC2019_processed"
-output_dir = "satellite"
+dataset_dir = "/project/jayinnn/SatelliteSfM/data/NYC"
+output_dir = "ges"
 output_suffix = "sh_degree_1"
 
 dry_run = False
@@ -21,7 +21,7 @@ excluded_gpus = set([])
 jobs = list(itertools.product(scenes, factors))
 
 def train_scene(gpu, scene, factor):
-    cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python train.py -s {dataset_dir}/{scene}/outputs_skew -m {output_dir}/{scene}_{output_suffix} --eval --port {6209+int(gpu)} --kernel_size 0.1 --resolution 1 --sh_degree 1 --opacity_reset_interval 3000 --densify_until_iter 21000 --densify_grad_threshold 0.0001 --scaling_lr 0.001 --rotation_lr 0.001"
+    cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python train.py -s {dataset_dir}/{scene} -m {output_dir}/{scene}_{output_suffix} --eval --port {6209+int(gpu)} --kernel_size 0.1 --resolution 1 --sh_degree 1"
     print(cmd)
     if not dry_run:
         os.system(cmd)

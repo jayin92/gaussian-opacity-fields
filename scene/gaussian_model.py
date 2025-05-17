@@ -285,6 +285,8 @@ class GaussianModel:
             
             x, y, z = xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2]
             z = torch.clamp(z, min=0.001)
+
+            print(z.max(), z.min(), z.shape)
             
             cx_ori = camera.cx / 2 * camera.image_width + camera.image_width / 2
             cy_ori = camera.cy / 2 * camera.image_height + camera.image_height / 2
@@ -304,6 +306,9 @@ class GaussianModel:
             valid_points = torch.logical_or(valid_points, valid)
             if focal_length < camera.focal_x:
                 focal_length = camera.focal_x
+
+        print(valid_points.shape)
+        print(valid_points.sum())
         
         distance[~valid_points] = distance[valid_points].max()
         
@@ -689,6 +694,7 @@ class GaussianModel:
         grads_abs = self.xyz_gradient_accum_abs / self.denom
         grads_abs[grads_abs.isnan()] = 0.0
         ratio = (torch.norm(grads, dim=-1) >= max_grad).float().mean()
+        print(ratio, grads_abs.max(), grads_abs.min(), grads_abs.shape)
         Q = torch.quantile(grads_abs.reshape(-1), 1 - ratio)
         
         before = self._xyz.shape[0]

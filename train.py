@@ -149,6 +149,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         image = rendering[:3, :, :]
+
+        # Save rendered image
+        torchvision.utils.save_image(image, os.path.join(dataset.model_path, "rendered_image.png"))
         
         # rgb Loss
         gt_image = viewpoint_cam.original_image.cuda()
